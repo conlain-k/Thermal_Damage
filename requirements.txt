@@ -1,4 +1,5 @@
---find-links https://storage.googleapis.com/jax-releases/jax_releases.html
+wheel
+--find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 jax[cuda]
 flax
 numpy
