@@ -12,15 +12,15 @@ import matplotlib.pyplot as plt
 from functools import partial
 
 # how many samples per batch?
-batch_size = 2048
+batch_size = 256
 input_size = 2
 learning_rate = 5e-2
 seed = 7
 
 num_epochs = 5000
 
-xmin = -np.pi
-xmax = np.pi
+xmin = -2 * np.pi
+xmax = 2 * np.pi
 
 
 # ignore parameters
@@ -31,7 +31,7 @@ def U_true_wrapper(params, x):
 @jit
 def U_true(xvec):
     x, y = xvec[..., 0], xvec[..., 1]
-    return jnp.sin(x) * jnp.exp(-y)
+    return jnp.sin(x) * jnp.cosh(y)
 
 
 def grad_U(xvec):
@@ -117,8 +117,8 @@ def lapl_op(g):
 
 
 # given sensors x, compute the loss for model u given params
-@partial(jax.vmap, in_axes=(None, None, 0))
 @partial(jit, static_argnames="u")
+@partial(jax.vmap, in_axes=(None, None, 0))
 def PINN_loss(u, params, batch):
     # split inputs and outputs
     (X, y) = batch
@@ -151,8 +151,8 @@ def PINN_loss(u, params, batch):
     return PDE_loss
 
 
-@partial(jax.vmap, in_axes=(None, None, 0))
 @partial(jit, static_argnames="u")
+@partial(jax.vmap, in_axes=(None, None, 0))
 def supervised_loss(u, params, batch):
     X, y = batch
     # apply model to given x vals
@@ -162,8 +162,8 @@ def supervised_loss(u, params, batch):
     return loss(y, y_pred)
 
 
-@partial(jax.vmap, in_axes=(None, None, 0))
 @partial(jit, static_argnames="u")
+@partial(jax.vmap, in_axes=(None, None, 0))
 def BC_loss(u, params, bcs_batch):
     bc_X, bc_y = bcs_batch
     u_bcs = u({"params": params}, bc_X)
@@ -181,13 +181,13 @@ def train_step(state, batch, bcs_batch):
     # bind all loss functions into one joint term (map in model u and sensors x)
     def combined_loss(params):
         # comput loss for each instance in batch, then sum
-        sup = 0.0 * supervised_loss(state.apply_fn, params, batch).mean()
+        # sup = 0.0 * supervised_loss(state.apply_fn, params, batch).mean()
         pde = PINN_loss(state.apply_fn, params, batch).mean()
         bcs = BC_loss(state.apply_fn, params, bcs_batch).mean()
 
-        scaled_loss = (sup**2 + pde**2 + bcs**2) / (sup + pde + bcs)
+        # scaled_loss = (sup**2 + pde**2 + bcs**2) / (sup + pde + bcs)
 
-        sum_loss = sup + pde + bcs
+        sum_loss = pde + bcs
 
         # compute scaled MSE
         loss = sum_loss
@@ -196,7 +196,7 @@ def train_step(state, batch, bcs_batch):
         loss = jnp.sqrt(loss)
 
         # compute combined loss, but return them individually
-        return loss, {"sup": sup, "pde": pde, "bcs": bcs}
+        return loss, {"pde": pde, "bcs": bcs}
 
     # get gradients for current parameter assignment
     (_, metrics), grads = jax.value_and_grad(combined_loss, has_aux=True)(state.params)
@@ -220,7 +220,9 @@ def make_state(rng):
     optimizer = optax.adamw(learning_rate=schedule, weight_decay=1e-5)
 
     # now build full training state
-    state = train_state.TrainState.create(apply_fn=model.apply, params=variables["params"], tx=optimizer)
+    state = train_state.TrainState.create(
+        apply_fn=model.apply, params=variables["params"], tx=optimizer
+    )
 
     return state
 
@@ -236,7 +238,9 @@ def sample_bcs(count, rng):
     def sample_1d(c, rng):
         # now update the rng seed
         rng, _ = jax.random.split(rng)
-        samp_vals = jax.random.uniform(rng, shape=(c, input_size), minval=xmin, maxval=xmax)
+        samp_vals = jax.random.uniform(
+            rng, shape=(c, input_size), minval=xmin, maxval=xmax
+        )
 
         return samp_vals, rng
 
@@ -245,7 +249,10 @@ def sample_bcs(count, rng):
     ylo, rng = sample_1d(count // 4, rng)
     yhi, rng = sample_1d(count // 4, rng)
     # also get min and max vals
-    mins, maxes = jnp.ones(shape=(count // 4, 1)) * xmin, jnp.ones(shape=(count // 4, 1)) * xmax
+    mins, maxes = (
+        jnp.ones(shape=(count // 4, 1)) * xmin,
+        jnp.ones(shape=(count // 4, 1)) * xmax,
+    )
 
     # override these terms to be external
     # jax makes this kinda janky lol
@@ -293,9 +300,18 @@ if __name__ == "__main__":
     # print("Approx soln PDE loss", PINN_loss(state.apply_fn, state.params, (x_i_test, None)))
 
     print("True solution PDE loss", PINN_loss(U_true_wrapper, None, (XY, None)).mean())
-    print("True solution BC loss", BC_loss(U_true_wrapper, None, (x_bcs_test, U_bcs)).mean())
-    print("Approx soln PDE loss", PINN_loss(state.apply_fn, state.params, (XY, None)).mean())
-    print("Approx soln BC loss", BC_loss(state.apply_fn, state.params, (x_bcs_test, U_bcs)).mean())
+    print(
+        "True solution BC loss",
+        BC_loss(U_true_wrapper, None, (x_bcs_test, U_bcs)).mean(),
+    )
+    print(
+        "Approx soln PDE loss",
+        PINN_loss(state.apply_fn, state.params, (XY, None)).mean(),
+    )
+    print(
+        "Approx soln BC loss",
+        BC_loss(state.apply_fn, state.params, (x_bcs_test, U_bcs)).mean(),
+    )
 
     u_pred = u_batched({"params": state.params}, XY)
     u_pred = u_pred.reshape(101, 101)
