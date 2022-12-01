@@ -1,0 +1,11 @@
+name: fenicsx-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - fenics-dolfinx
+  - jupyter
+  - notebook
+  - pythreejs
+  - pyvista
+  - mpich

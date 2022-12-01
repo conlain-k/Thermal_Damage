@@ -19,8 +19,8 @@ seed = 7
 
 num_epochs = 5000
 
-xmin = 0
-xmax = 2 * np.pi
+xmin = -2 * np.pi
+xmax = 0
 
 
 # ignore parameters
@@ -30,8 +30,8 @@ def U_true_wrapper(params, x):
 
 @jit
 def U_true(xvec):
-    x, t = xvec[..., 0], xvec[..., 1]
-    return jnp.sin(2.0 * x) * jnp.exp(-y)
+    x, y = xvec[..., 0], xvec[..., 1]
+    return jnp.sin(x) * jnp.exp(-y)
 
 
 def grad_U(xvec):
