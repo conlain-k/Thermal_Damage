@@ -15,13 +15,16 @@ from functools import partial
 batch_size = 256
 input_size = 2
 learning_rate = 5e-2
-seed = 7
+seed = 8
 
 num_epochs = 5000
 
-xmin = 0
-xmax = 2 * np.pi
+xmin = -2
+xmax = 2
 
+lam = 2
+
+Nprint = 256 + 1
 
 # ignore parameters
 def U_true_wrapper(params, x):
@@ -30,18 +33,46 @@ def U_true_wrapper(params, x):
 
 @jit
 def U_true(xvec):
-    x, t = xvec[..., 0], xvec[..., 1]
-    return jnp.sin(2.0 * x) * jnp.exp(-y)
-
-
-def grad_U(xvec):
     x, y = xvec[..., 0], xvec[..., 1]
-    return jnp.stack([jnp.cos(x) * jnp.exp(-y), -jnp.sin(x) * jnp.exp(-y)], axis=-1)
+
+    xlo = (x <= 0) * 1.0
+    xhi = (x > 0) * 1.0
+    return 0 * x * y  # zero-Dirichlet
+    # return (8 - x**2 - y**2) * xlo + (
+    #     4 + 4 * jnp.exp(-x * lam) - y**2
+    # ) * xhi  # nonlinear
+    # return 1 + 2 * x + 4 * y  # linear
+    # return 1 + 2 * x + 4 * y + 6 * x * y  # bilinear
+    # return 1 + 2 * x + 4 * y + 6 * x * y + 8 * x**2 + 10 * y**2  # quadratic
 
 
-def gradgrad_U(xvec):
+@jit
+def k(xvec):
     x, y = xvec[..., 0], xvec[..., 1]
-    return jnp.stack([-jnp.sin(x) * jnp.exp(-y), jnp.sin(x) * jnp.exp(-y)], axis=-1)
+    xlo = (x <= 0) * 1.0
+    xhi = (x > 0) * 1.0
+
+    return xlo + 5 * xhi
+
+
+@jit
+def H_true(xvec):
+    x, y = xvec[..., 0], xvec[..., 1]
+
+    xlo = (x <= 0) * 1.0
+    xhi = (x > 0) * 1.0
+
+    lapl = 4 * xlo + (2 + 9 * jnp.cos(x)) * xhi
+
+    lap = lapl_op(U_true)(xvec)
+
+    # if U_True is prescribed
+    Hx = -lap * k(xvec)
+
+    # if we want to prescribe H instead
+    return jnp.exp(-(x**2 + y**2) / 1)
+
+    # return
 
 
 def MAE(x1, x2):
@@ -65,16 +96,18 @@ class PINN(nn.Module):
             print("XXX", x.shape)
             exit(-1)
         # note that here x represents the input vector = [x_i, t_i]
+
+        # comment out pairs of lines to add more hidden layers
+        # # 2 HL
         x = nn.Dense(features=64)(x)
         x = nn.softplus(x)
-        x = nn.Dense(features=32)(x)
-        x = nn.softplus(x)
-        x = nn.Dense(features=16)(x)
-        x = nn.softplus(x)
-        x = nn.Dense(features=8)(x)
+
+        # 1HL
+        x = nn.Dense(features=64)(x)
         x = nn.softplus(x)
 
         x = nn.Dense(features=1)(x)
+
         return x
 
 
@@ -143,10 +176,13 @@ def PINN_loss(u, params, batch):
     # grad_u_t = grad_op(u_t)(X)
 
     # get heat eqn resid
-    resid = lapl_u_x  # + grad_u_t
+    resid = k(X) * lapl_u_x + H_true(X)  # + grad_u_t
+
+    # print(k(X) * lapl_u_x)
+    # print(H_true(X))
 
     # PINN loss is squared PDE residual, summed across input
-    PDE_loss = loss(lapl_u_x, jnp.zeros_like(lapl_u_x))
+    PDE_loss = loss(resid, jnp.zeros_like(resid))
 
     return PDE_loss
 
@@ -220,7 +256,9 @@ def make_state(rng):
     optimizer = optax.adamw(learning_rate=schedule, weight_decay=1e-5)
 
     # now build full training state
-    state = train_state.TrainState.create(apply_fn=model.apply, params=variables["params"], tx=optimizer)
+    state = train_state.TrainState.create(
+        apply_fn=model.apply, params=variables["params"], tx=optimizer
+    )
 
     return state
 
@@ -236,7 +274,9 @@ def sample_bcs(count, rng):
     def sample_1d(c, rng):
         # now update the rng seed
         rng, _ = jax.random.split(rng)
-        samp_vals = jax.random.uniform(rng, shape=(c, input_size), minval=xmin, maxval=xmax)
+        samp_vals = jax.random.uniform(
+            rng, shape=(c, input_size), minval=xmin, maxval=xmax
+        )
 
         return samp_vals, rng
 
@@ -285,7 +325,9 @@ if __name__ == "__main__":
 
     x_bcs_test, rng = sample_bcs(1000, rng)
     U_bcs = U_true(x_bcs_test)
-    X, Y = jnp.meshgrid(jnp.linspace(xmin, xmax, 101), jnp.linspace(xmin, xmax, 101))
+    X, Y = jnp.meshgrid(
+        jnp.linspace(xmin, xmax, Nprint), jnp.linspace(xmin, xmax, Nprint)
+    )
     XY = jnp.stack((X.ravel(), Y.ravel()), axis=-1)
     print(XY.shape)
 
@@ -310,22 +352,63 @@ if __name__ == "__main__":
     )
 
     u_pred = u_batched({"params": state.params}, XY)
-    u_pred = u_pred.reshape(101, 101)
+    u_pred = u_pred.reshape(Nprint, Nprint)
     print(u_pred.shape)
-    u_true = U_true(XY).reshape(101, 101)
+    u_true = U_true(XY).reshape(Nprint, Nprint)
 
-    fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+    fig, ax = plt.subplots(2, 3, figsize=(12, 7))
     # plt.imshow()
-    im0 = ax[0].imshow(u_true)
-    fig.colorbar(im0, ax=ax[0])
-    ax[0].set_title("True field")
+    im0 = ax[0, 0].imshow(u_true)
+    fig.colorbar(im0, ax=ax[0, 0])
+    ax[0, 0].set_title("True field")
 
-    im1 = ax[1].imshow(u_pred)
-    fig.colorbar(im1, ax=ax[1])
-    ax[1].set_title("Predicted field")
+    im1 = ax[0, 1].imshow(u_pred)
+    fig.colorbar(im1, ax=ax[0, 1])
+    ax[0, 1].set_title("Predicted field")
 
-    im2 = ax[2].imshow(abs(u_true - u_pred))
-    fig.colorbar(im2, ax=ax[2])
-    ax[2].set_title("Error")
+    im2 = ax[0, 2].imshow(abs(u_true - u_pred))
+    fig.colorbar(im2, ax=ax[0, 2])
+    ax[0, 2].set_title("Error")
+    # fig.tight_layout()
+    # plt.savefig("PINN_results.png", dpi=300)
+
+    kplot = jax.vmap(k)(XY).reshape(Nprint, Nprint)
+    Hplot = jax.vmap(H_true)(XY).reshape(Nprint, Nprint)
+    pde_resid = PINN_loss(state.apply_fn, state.params, (XY, None)).reshape(
+        Nprint, Nprint
+    )
+
+    # get x vals along y = 50
+    XY_r = XY.reshape(Nprint, Nprint, 2)
+    xplot = XY_r[50, :, 0]
+    # print(XY_r[50, :])
+    ax[1, 0].plot(xplot, u_true[50, :], label="True")
+    ax[1, 0].plot(xplot, u_pred[50, :], label="Predicted")
+    ax[1, 0].legend()
+    ax[1, 0].set_title("Slice of solutions along $y=0$")
+
+    im1 = ax[1, 1].imshow(Hplot)
+    fig.colorbar(im1, ax=ax[1, 1])
+    ax[1, 1].set_title("$H(x)$")
+
+    fig.colorbar(im2, ax=ax[1, 2])
+    ax[1, 2].set_title("PDE Residual")
+    im0 = ax[1, 2].imshow(pde_resid)
+
     fig.tight_layout()
+    plt.savefig("PINN_results.png", dpi=300)
+
+    # make smaller plots intended for last case study
+    fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+    im0 = ax[0].imshow(u_pred)
+    fig.colorbar(im0, ax=ax[0])
+    ax[0].set_title("PINN Predicted Solution")
+
+    im1 = ax[1].imshow(pde_resid)
+    fig.colorbar(im1, ax=ax[1])
+    ax[1].set_title("PDE Residual")
+
+    fig.tight_layout()
+    plt.savefig("PINN_small.png", dpi=300)
+
     plt.show()
